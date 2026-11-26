@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Empty composer fixture</title></head>
+<body>
+<main>
+<h1>general</h1>
+<!-- A channel's messages above a message box built as Discord's is, by Slate, with nothing typed in it:
+its one empty paragraph holds a zero-width no-break space, as Discord's does, and nothing to see. -->
+<ol aria-label="Messages in general">
+<li><p>Hello from the channel</p></li>
+</ol>
+<div id="message" role="textbox" aria-multiline="true" aria-label="Message #general" contenteditable="true" data-slate-editor="true"><div data-slate-node="element"><span data-slate-node="text"><span data-slate-leaf="true"><span data-slate-zero-width="n" data-slate-length="0">﻿<br></span></span></span></div></div>
+</main>
+<script>
+document.getElementById("message").focus();
+</script>
+</body></html>

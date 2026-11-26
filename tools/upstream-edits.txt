@@ -294,8 +294,11 @@ source/appModules/caja.py
 source/appModules/chromium.py
   Linux runtime: added. The app module for Chromium, which makes sure
   Chromium builds a page's accessible tree, names a page's landmarks for
-  their kind and reads a rich text editor's paragraphs as one text; on
-  Windows, where Chromium is chrome.exe, it is the default
+  their kind, reads a rich text editor's paragraphs as one text by the
+  lines the screen shows them on, and says once when a program, such as
+  Discord on Electron 37, does not tell where its lines wrap unless started
+  with --force-renderer-accessibility; on Windows, where Chromium is
+  chrome.exe, it is the default
 source/appModules/discord.py
   Linux runtime: added. Discord's app module is Chromium's; on Windows,
   where Discord.exe would load it, it is the default

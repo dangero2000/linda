@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Wrapped composer fixture</title>
+<style>
+#message { width: 30ch; font: 16px monospace; padding: 0; border: 1px solid; }
+</style>
+</head>
+<body>
+<main>
+<h1>general</h1>
+<!-- A message box built as Discord's is, by Slate: an editable element with the textbox role holding a
+block for each line typed, its text in spans inside spans. The box is narrow, so that a long line wraps
+onto lines of the screen of its own: 30 characters of a font whose characters are all as wide. -->
+<div id="message" role="textbox" aria-multiline="true" aria-label="Message #general" contenteditable="true" data-slate-editor="true"><div data-slate-node="element"><span data-slate-node="text"><span data-slate-leaf="true"><span data-slate-string="true">one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen</span></span></span></div><div data-slate-node="element"><span data-slate-node="text"><span data-slate-leaf="true"><span data-slate-string="true">alpha beta gamma delta </span></span></span><span data-slate-node="text"><span data-slate-leaf="true"><strong data-slate-string="true">epsilon zeta</strong></span></span><span data-slate-node="text"><span data-slate-leaf="true"><span data-slate-string="true"> eta theta iota kappa lambda mu</span></span></span></div><div data-slate-node="element"><span data-slate-node="text"><span data-slate-leaf="true"><span data-slate-string="true">Last line</span></span></span></div></div>
+</main>
+<script>
+document.getElementById("message").focus();
+</script>
+</body></html>

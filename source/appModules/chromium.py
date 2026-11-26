@@ -16,7 +16,8 @@ text in the paragraphs inside it, and its own text has an embedded object charac
 them. Read as it is, the editor says that character and nothing of what was typed, and its caret is
 nowhere. Its text is therefore read as one, its paragraphs' text with a line break between them, as
 NVDA reads such an editor on Windows. Its caret, selection and text change in the paragraph, which
-alone reports them, and the editor takes those reports as its own.
+alone reports them, and the editor takes those reports as its own. Its lines are those the screen
+shows, a paragraph wider than the editor on several, which the paragraph tells.
 """
 
 import sys
@@ -32,6 +33,7 @@ if sys.platform == "linux":
 	from linuxPlatform.atspi import handler
 	from linuxPlatform.atspi.client import Node, NodeGone, call
 	from locationHelper import RectLTWH
+	from logHandler import log
 	from NVDAObjects.AtSpi import AtSpi
 	from textInfos.offsets import OffsetsTextInfo, findEndOfLine, findStartOfLine
 
@@ -101,6 +103,13 @@ if sys.platform == "linux":
 			self.length = 0
 			#: The line break owed after a paragraph, given once something follows it, as (its node, its length).
 			self._break: tuple[Node, int] | None = None
+			#: Each object inside the editor, as the object whose text holds its embedded object character and
+			#: that character's offset there; and where in the whole text its own text starts.
+			self.parents: dict[Node, tuple[Node, int]] = {}
+			self.childStarts: dict[tuple[Node, int], int] = {}
+			#: The objects that are paragraphs, which say where the screen breaks their lines: the editor
+			#: itself, and each block inside it.
+			self.blocks: set[Node] = {root}
 			self._add(root, 0)
 			self.text = "".join(self._parts)
 
@@ -158,7 +167,11 @@ if sys.platform == "linux":
 				block = _isBlock(child)
 				if block and self._break is None and self._parts and not self._parts[-1].endswith("\n"):
 					self._append("\n", node, offset, 0)
+				self.parents[child] = (node, offset)
+				if block:
+					self.blocks.add(child)
 				before = self.length
+				self.childStarts[(node, offset)] = before
 				self._add(child, depth + 1)
 				if block and self.length > before:
 					try:
@@ -195,6 +208,37 @@ if sys.platform == "linux":
 			if ending is not None:
 				return ending
 			return None
+
+		def _flatOffset(self, node: Node, nodeOffset: int) -> int | None:
+			"""The offset in the whole text of node's own nodeOffset, an embedded object character's among
+			them: where the text of the object it stands for starts."""
+			start = self.childStarts.get((node, nodeOffset))
+			return start if start is not None else self.offsetOf(node, nodeOffset)
+
+		def shownLine(self, offset: int) -> tuple[int, int] | None:
+			"""The line of the screen the character at offset is on, as (start, end) in the whole text,
+			from the paragraph holding it; None when it cannot say. The text of a bold word or a link is
+			an object of its own, inside the paragraph, which knows only its own part of the line."""
+			run = self.runAt(offset)
+			if run is None or not run.nodeLength:
+				return None
+			node, nodeOffset = run.node, run.nodeOffset(offset)
+			while node not in self.blocks:
+				parent = self.parents.get(node)
+				if parent is None:
+					return None
+				node, nodeOffset = parent
+			try:
+				line = call(node, Atspi.Text.get_string_at_offset, nodeOffset, Atspi.TextGranularity.LINE)
+			except NodeGone:
+				return None
+			if not line.start_offset <= nodeOffset < line.end_offset:
+				return None
+			start = self._flatOffset(node, line.start_offset)
+			end = self._flatOffset(node, line.end_offset)
+			if start is None or end is None or not start <= offset < end:
+				return None
+			return (start, end)
 
 		def caret(self) -> int:
 			"""Where the caret is in the whole text; the deepest object holding it says."""
@@ -286,11 +330,25 @@ if sys.platform == "linux":
 			return super()._getCharacterOffsets(offset)
 
 		def _getLineOffsets(self, offset: int) -> tuple[int, int]:
+			"""The line of the screen offset is on, as NVDA reads a line on Windows: a paragraph longer than
+			the editor is wide is broken onto several, which Chromium tells. A paragraph's line break goes
+			with its last line, and the caret at the end of the paragraph is on that line."""
+			start, end = self._getParagraphOffsets(offset)
 			text = self.editorText.text
-			return (findStartOfLine(text, offset), findEndOfLine(text, offset))
+			atEnd = offset >= len(text) or text[offset] == "\n"
+			shown = self.editorText.shownLine(offset - 1 if atEnd and offset > start else offset)
+			if shown is None:
+				return (start, end)
+			shownStart, shownEnd = max(start, shown[0]), min(end, shown[1])
+			if text[shownEnd:end] in ("", "\n"):
+				shownEnd = end
+			if not (shownStart <= offset < shownEnd or offset == shownEnd == end):
+				return (start, end)
+			return (shownStart, shownEnd)
 
 		def _getParagraphOffsets(self, offset: int) -> tuple[int, int]:
-			return self._getLineOffsets(offset)
+			text = self.editorText.text
+			return (findStartOfLine(text, offset), findEndOfLine(text, offset))
 
 		def _getBoundingRectFromOffset(self, offset: int) -> RectLTWH:
 			node, nodeOffset = self.editorText.locate(offset)
@@ -313,6 +371,138 @@ if sys.platform == "linux":
 	class RichTextEditor(AtSpi):
 		def _get_TextInfo(self):
 			return EditorTextInfo
+
+	#: Characters with no width of their own, which a program may give no place on the screen whatever
+	#: it tells: an empty paragraph's in Discord's editor among them.
+	NO_WIDTH = frozenset("\ufeff\u200b\u2060" + EMBEDDED_OBJECT)
+	#: The programs, by process, looked at for whether they tell where their lines wrap.
+	_linesLookedAt: set[int] = set()
+	#: Milliseconds from the focus coming to a message box to looking at its program, when the focus has
+	#: moved no further: as a window comes to the front or a page loads, the focus moves several times.
+	UNSHOWN_LINES_DELAY_MS = 300
+	#: Objects with text looked at, at most, for one with something to see.
+	SHOWN_TEXT_LIMIT = 20
+	#: How far up from the focus the document holding it is looked for.
+	DOCUMENT_DEPTH = 40
+	_pendingLook = None
+
+	def _lookForUnshownLinesSoon(obj) -> None:
+		"""Look at obj's program once the focus has stayed on obj a moment, unless it was looked at."""
+		global _pendingLook
+		import core
+
+		if obj.processID in _linesLookedAt:
+			return
+		if _pendingLook is not None:
+			_pendingLook.Stop()
+		_pendingLook = core.callLater(UNSHOWN_LINES_DELAY_MS, _tellOfUnshownLines, obj)
+
+	def _firstSeen(text: str) -> int | None:
+		"""The offset of text's first character with something to see, or None."""
+		return next((i for i, c in enumerate(text) if not c.isspace() and c not in NO_WIDTH), None)
+
+	def _documentHolding(node: Node) -> Node | None:
+		client = handler.client()
+		for _level in range(DOCUMENT_DEPTH):
+			try:
+				if call(node, Atspi.Accessible.get_role) == Atspi.Role.DOCUMENT_WEB:
+					return node
+				node = client.parent(node)
+			except NodeGone:
+				return None
+			if node is None:
+				return None
+		return None
+
+	def _shownCharacter(obj) -> tuple[Node, int] | None:
+		"""A character the screen shows in or near obj, a message box, as the object holding it and its
+		offset there: the box's own first; else, with nothing typed in it, the first in the document
+		holding it, as even Electron 37 gives an empty paragraph's zero-width space a place. None when obj
+		is not a message box or nothing shown has more than spaces."""
+		if not isinstance(obj, RichTextEditor):
+			# Asked where text other than the focus's is, Chromium loses the next key's caret movement
+			# now and then: a page that is loading has the focus on the document a moment, and a key
+			# soon after would go unread. A message box is where lines matter.
+			return None
+		text = EditorText(obj.node)
+		offset = _firstSeen(text.text)
+		if offset is not None:
+			return text.locate(offset)
+		document = _documentHolding(obj.node)
+		if document is None:
+			return None
+		client = handler.client()
+		rule = Atspi.MatchRule.new(
+			Atspi.StateSet.new([Atspi.StateType.SHOWING]),
+			Atspi.CollectionMatchType.ALL,
+			None,
+			Atspi.CollectionMatchType.NONE,
+			None,
+			Atspi.CollectionMatchType.NONE,
+			["Text"],
+			Atspi.CollectionMatchType.ALL,
+			False,
+		)
+		try:
+			matches = call(
+				document,
+				Atspi.Collection.get_matches,
+				rule,
+				Atspi.CollectionSortOrder.CANONICAL,
+				SHOWN_TEXT_LIMIT,
+				True,
+			)
+		except NodeGone:
+			return None
+		for match in matches or ():
+			node = client.node(match)
+			if node is None:
+				continue
+			try:
+				offset = _firstSeen(client.text(node))
+			except NodeGone:
+				continue
+			if offset is not None:
+				return (node, offset)
+		return None
+
+	def _tellOfUnshownLines(obj) -> None:
+		"""Say, once while a program runs, that it does not tell where its lines wrap, as an Electron
+		program such as Discord does not before Electron 45 unless it was started with
+		--force-renderer-accessibility: Up and Down in its message box then read a paragraph whole, from
+		its start to the next line break typed. Such a program gives no place on the screen to any of its
+		text. Said as soon as the focus settles in its message box, as its window comes to the front too,
+		interrupting what is being said of it."""
+		global _pendingLook
+		_pendingLook = None
+		if api.getFocusObject() != obj or obj.processID in _linesLookedAt:
+			return
+		shown = _shownCharacter(obj)
+		if shown is None:
+			# Nothing to look at yet; the next time the focus comes to a message box, there may be.
+			return
+		_linesLookedAt.add(obj.processID)
+		node, offset = shown
+		try:
+			extents = call(node, Atspi.Text.get_character_extents, offset, Atspi.CoordType.SCREEN)
+		except NodeGone:
+			return
+		if extents.width > 0 or extents.height > 0:
+			return
+		import ui
+
+		# The name the program gives the bus, as Discord, else its executable's.
+		program = handler._applicationName(obj.node.busName) or obj.appModule.appName
+		log.info(f"Chromium: {program} gives its text no place on the screen")
+		ui.message(
+			# Translators: Said once when the focus first comes to the message box of a program built on
+			# Electron, such as Discord, which tells a screen reader where its lines wrap only when started
+			# with the option named.
+			_(
+				"{program} does not tell where its lines wrap, so Up and Down arrow read whole paragraphs. "
+				"Start it with the option --force-renderer-accessibility to read each line.",
+			).format(program=program),
+		)
 
 	def _editorHolding(obj) -> RichTextEditor | None:
 		"""The focus, when it is a rich text editor and obj is inside it."""
@@ -388,6 +578,11 @@ if sys.platform == "linux":
 				nextHandler()
 			else:
 				editor.event_textRemove()
+
+		def event_gainFocus(self, obj, nextHandler):
+			nextHandler()
+			if isinstance(obj, AtSpi):
+				_lookForUnshownLinesSoon(obj)
 
 		def event_foreground(self, obj, nextHandler):
 			if isinstance(obj, AtSpi):
